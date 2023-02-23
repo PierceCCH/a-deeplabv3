@@ -42,12 +42,11 @@ class HandCodedLaneFollower(object):
             logging.error('No lane lines detected, nothing to do.')
             return frame
 
-        new_steering_angle = compute_steering_angle(frame, lane_lines)
+        new_steering_angle, curr_heading_image = compute_steering_angle(frame, lane_lines)
         self.curr_steering_angle = stabilize_steering_angle(self.curr_steering_angle, new_steering_angle, len(lane_lines))
 
         if self.car is not None:
             self.car.front_wheels.turn(self.curr_steering_angle)
-        curr_heading_image = display_heading_line(frame, self.curr_steering_angle)
         show_image("heading", curr_heading_image)
 
         return curr_heading_image
@@ -128,7 +127,7 @@ def average_slope_intercept(frame, line_segments):
     """
     lane_lines = []
     if line_segments is None:
-        logging.info('No line_segment segments detected')
+        print("No lane lines found")
         return lane_lines
 
     height, width, _ = frame.shape
@@ -168,7 +167,6 @@ def average_slope_intercept(frame, line_segments):
 
     return lane_lines
 
-# TODO: This is fked
 def compute_steering_angle(frame, lane_lines):
     """ Find the steering angle based on lane line coordinate
         We assume that camera is calibrated to point to dead center
@@ -176,25 +174,29 @@ def compute_steering_angle(frame, lane_lines):
     if len(lane_lines) == 0:
         return -90
 
-    height, width, _ = frame.shape
     if len(lane_lines) == 1:
-        x1, _, x2, _ = lane_lines[0][0]
-        x_offset = x2 - x1
+        mid_start_x, mid_start_y, mid_end_x, mid_end_y = lane_lines[0][0]
     else:
-        _, _, left_x2, _ = lane_lines[0][0]
-        _, _, right_x2, _ = lane_lines[1][0]
+        left_x1, left_y1, left_x2, left_y2 = lane_lines[0][0]
+        right_x1, right_y1, right_x2, right_y2 = lane_lines[1][0]
+
         camera_mid_offset_percent = 0.0 # 0.0 means car pointing to center, -0.03: car is centered to left, +0.03 means car pointing to right
-        mid = int(width / 2 * (1 + camera_mid_offset_percent))
-        x_offset = (left_x2 + right_x2) / 2 - mid
 
-    # find the steering angle, which is angle between navigation direction to end of center line
-    y_offset = int(height / 2)
+        mid_start_x = int((left_x1 + right_x1) / 2 * (1 + camera_mid_offset_percent))
+        mid_start_y = int((left_y1 + right_y1) / 2)
+        mid_end_x = int((left_x2 + right_x2) / 2 * (1 + camera_mid_offset_percent))
+        mid_end_y = int((left_y2 + right_y2) / 2)
 
-    angle_to_mid_radian = math.atan(x_offset / y_offset)  # angle (in radian) to center vertical line
-    angle_to_mid_deg = int(angle_to_mid_radian * 180.0 / math.pi)  # angle (in degrees) to center vertical line
-    steering_angle = angle_to_mid_deg + 90  # this is the steering angle needed by picar front wheel
+    # Find slope of line connecting 2 points
+    slope = (mid_end_y - mid_start_y) / (mid_end_x - mid_start_x) 
 
-    return steering_angle
+    # Find angle from slope
+    steering_angle = (math.atan(slope) * 180 / math.pi)
+
+    heading_line_img = display_heading_line(frame, (mid_start_x, mid_start_y), (mid_end_x, mid_end_y))
+    print("Pre-stabalized steering angle: ", steering_angle)
+
+    return steering_angle, heading_line_img
 
 def stabilize_steering_angle(curr_steering_angle, new_steering_angle, num_of_lane_lines, max_angle_deviation_two_lines=5, max_angle_deviation_one_lane=1):
     if num_of_lane_lines == 2 :
@@ -244,76 +246,12 @@ def outlierCleaner(predictions, x, y, inlier_percent=0.9):
             y = np.take(y, survived_idx)
     return (x, y)
 
-# Unused
-def regress_a_line(img, x, y):
-    """ regress a line from x, y and add it to img
-    (1) use a linear regressor to fit the data (x,y)
-    (2) remove outlier, and then fit the cleaned data again to get slope and intercept
-    (3) find the two ends of the desired line by using slope and intercept
-    
-    :param img: input image
-    :param x: x coordinate
-    :param y: y coordinate
-    :param color: line color
-    :param thickness: thickness of the line  
-    """
-    reg = LinearRegression()
-    reg.fit(x, y)
-
-    # identify and remove outliers
-    cleaned_data = []
-    try:
-        predictions = reg.predict(x)
-        cleaned_data = outlierCleaner(predictions, x, y)
-    except NameError:
-        print("err in regression prediction")
-
-    if len(cleaned_data) > 0:
-        x, y = cleaned_data   
-        # refit cleaned data!
-        try:
-            reg.fit(x, y)
-        except NameError:
-            print("err in reg.fit for cleaned data")
-    else:
-        print("outlierCleaner() is returning an empty list, no refitting to be done")
-
-    height = img.shape[0]
-    slope = reg.coef_
-    inter = reg.intercept_
-
-    # find the two end points of the line by using slope and iter, and then visulize the line
-    if slope < 0:  # left lane
-        p1_x, p1_y, p2_x, p2_y = make_points(slope, inter, 'l', height)
-    else:  # right lane
-        p1_x, p1_y, p2_x, p2_y = make_points(slope, inter, 'r', height)
-    return [[p1_x, p1_y, p2_x, p2_y]]
-
-def display_heading_line(frame, steering_angle, line_color=(255, 0, 0), line_width=5, ):
+def display_heading_line(frame, p1, p2, line_color=(255, 0, 0), line_width=5):
     heading_image = np.zeros_like(frame)
-    height, width, _ = frame.shape
-
-    # figure out the heading line from steering angle
-    # heading line (x1,y1) is always center bottom of the screen
-    # (x2, y2) requires a bit of trigonometry
-
-    # Note: the steering angle of:
-    # 0-89 degree: turn left
-    # 90 degree: going straight
-    # 91-180 degree: turn right 
-    steering_angle_radian = steering_angle / 180.0 * math.pi
-    x1 = int(width / 2)
-    y1 = height
-    x2 = int(x1 - height / 2 / math.tan(steering_angle_radian))
-    y2 = int(height / 2)
-    print("Steering Angle: "+ str(steering_angle))
-    cv2.line(heading_image, (x1, y1), (x2, y2), line_color, line_width)
+    cv2.line(heading_image, p1, p2, line_color, line_width)
     heading_image = cv2.addWeighted(frame, 0.8, heading_image, 1, 1)
-    return heading_image
 
-def length_of_line_segment(line):
-    x1, y1, x2, y2 = line
-    return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    return heading_image
 
 def show_image(title, frame, show=_SHOW_IMAGE):
     if show:
@@ -354,9 +292,9 @@ def make_points(slope, inter, side, height):
         slope = sum(pre_r_slopes) / len(pre_r_slopes)
         inter = sum(pre_r_inters) / len(pre_r_inters)
 
-        p1_y = top_y
+        p1_y = height-1
         p1_x = int((float(p1_y)-inter)/slope)
-        p2_y = height-1
+        p2_y = top_y
         p2_x = int((float(p2_y)-inter)/slope)
 
     return [[p1_x, p1_y, p2_x, p2_y]]
