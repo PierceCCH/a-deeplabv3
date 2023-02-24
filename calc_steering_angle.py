@@ -3,8 +3,6 @@ import numpy as np
 import logging
 import math
 
-from sklearn.linear_model import LinearRegression
-
 _SHOW_IMAGE = True
 
 '''
@@ -43,10 +41,7 @@ class HandCodedLaneFollower(object):
             return frame
 
         new_steering_angle, curr_heading_image = compute_steering_angle(frame, lane_lines)
-        self.curr_steering_angle = stabilize_steering_angle(self.curr_steering_angle, new_steering_angle, len(lane_lines))
 
-        if self.car is not None:
-            self.car.front_wheels.turn(self.curr_steering_angle)
         show_image("heading", curr_heading_image)
 
         return curr_heading_image
@@ -194,10 +189,11 @@ def compute_steering_angle(frame, lane_lines):
     steering_angle = (math.atan(slope) * 180 / math.pi)
 
     heading_line_img = display_heading_line(frame, (mid_start_x, mid_start_y), (mid_end_x, mid_end_y))
-    print("Pre-stabalized steering angle: ", steering_angle)
+    print("Pre-stabilized steering angle: ", steering_angle)
 
     return steering_angle, heading_line_img
 
+# Unused.
 def stabilize_steering_angle(curr_steering_angle, new_steering_angle, num_of_lane_lines, max_angle_deviation_two_lines=5, max_angle_deviation_one_lane=1):
     if num_of_lane_lines == 2 :
         # if both lane lines detected, then we can deviate more
@@ -225,26 +221,6 @@ def display_lines(frame, lines, line_color=(0, 255, 0), line_width=10):
                 cv2.line(line_image, (x1, y1), (x2, y2), line_color, line_width)
     line_image = cv2.addWeighted(frame, 0.8, line_image, 1, 1)
     return line_image
-
-def outlierCleaner(predictions, x, y, inlier_percent=0.9):
-    """
-        Clean away the 10% of points that have the largest
-        residual errors (difference between the prediction
-        and the actual y values).
-
-        Return a list of tuples named cleaned_data where
-        each tuple is of the form (x, y, error).
-    """
-    threshold = 10  # if the biggest error is greater than 5 pixels, we perform outliers remove
-    errs = np.fabs(y - predictions)
-    max_err = max(errs)[0]
-    if max_err > threshold:  # if the biggest error is greater than 5 pixels, we remove the outliers
-        k = math.ceil(errs.size * inlier_percent)
-        survived_idx = np.argsort(errs, axis=0)[:k]  # find the number of k min errs, and return their index
-        if survived_idx.size > 0:
-            x = np.take(x, survived_idx)
-            y = np.take(y, survived_idx)
-    return (x, y)
 
 def display_heading_line(frame, p1, p2, line_color=(255, 0, 0), line_width=5):
     heading_image = np.zeros_like(frame)
