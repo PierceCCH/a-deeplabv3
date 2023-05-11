@@ -5,7 +5,7 @@ import logging
 import math
 from PIL import Image
 
-_SHOW_IMAGE = True
+_SHOW_IMAGE = False
 
 '''
 Hough Line Function Parameters

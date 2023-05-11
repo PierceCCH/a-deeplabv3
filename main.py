@@ -2,74 +2,35 @@ from tqdm import tqdm
 import network
 import utils
 import os
-import argparse
 
-from datasets import VOCSegmentation, Cityscapes
-from torchvision import transforms as T
+from datasets import Cityscapes
 
 import torch
 import torch.nn as nn
+from torchvision import transforms as T
 
-from PIL import Image, ImageFilter
+from PIL import Image
 from glob import glob
 
+import inference_utils as inf_utils
 import calc_steering_angle as st_util
 
-import cv2 as cv
-import numpy as np
-
-def get_argparser():
-    parser = argparse.ArgumentParser()
-
-    # Datset Options
-    parser.add_argument("--input", type=str, required=True,
-                        help="path to a single image or image directory")
-    parser.add_argument("--dataset", type=str, default='voc',
-                        choices=['voc', 'cityscapes'], help='Name of training set')
-
-    # Deeplab Options
-    available_models = sorted(name for name in network.modeling.__dict__ if name.islower() and \
-                              not (name.startswith("__") or name.startswith('_')) and callable(
-                              network.modeling.__dict__[name])
-                              )
-
-    parser.add_argument("--model", type=str, default='deeplabv3plus_mobilenet',
-                        choices=available_models, help='model name')
-    parser.add_argument("--separable_conv", action='store_true', default=False,
-                        help="apply separable conv to decoder and aspp")
-    parser.add_argument("--output_stride", type=int, default=16, choices=[8, 16])
-
-    # Train Options
-    parser.add_argument("--save_val_results_to", default=None,
-                        help="save segmentation results to the specified dir")
-
-    parser.add_argument("--crop_val", action='store_true', default=False,
-                        help='crop validation (default: False)')
-    parser.add_argument("--val_batch_size", type=int, default=4,
-                        help='batch size for validation (default: 4)')
-    parser.add_argument("--crop_size", type=int, default=513)
-
-    
-    parser.add_argument("--ckpt", default=None, type=str,
-                        help="resume from checkpoint")
-    parser.add_argument("--gpu_id", type=str, default='0',
-                        help="GPU ID")
-    return parser
-
 def main():
-    opts = get_argparser().parse_args()
-    if opts.dataset.lower() == 'voc':
-        opts.num_classes = 21
-        decode_fn = VOCSegmentation.decode_target
-    elif opts.dataset.lower() == 'cityscapes':
-        opts.num_classes = 19
-        decode_fn = Cityscapes.decode_target
+    opts = inf_utils.get_argparser().parse_args()
+    opts.dataset.lower() == 'cityscapes'
+    opts.num_classes = 19
+    decode_fn = Cityscapes.decode_target
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = opts.gpu_id
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cpu')
     print("Device: %s" % device)
 
-    # Setup dataloader
+    transform = T.Compose([
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225]),
+        ])
+
+    # Image dataloader, will be replaced by video stream
     image_files = []
     if os.path.isdir(opts.input):
         for ext in ['png', 'jpeg', 'jpg', 'JPEG']:
@@ -86,7 +47,6 @@ def main():
     utils.set_bn_momentum(model.backbone, momentum=0.01)
     
     if opts.ckpt is not None and os.path.isfile(opts.ckpt):
-        # https://github.com/VainF/DeepLabV3Plus-Pytorch/issues/8#issuecomment-605601402, @PytaichukBohdan
         checkpoint = torch.load(opts.ckpt, map_location=torch.device('cpu'))
         model.load_state_dict(checkpoint["model_state"])
         model = nn.DataParallel(model)
@@ -98,22 +58,6 @@ def main():
         model = nn.DataParallel(model)
         model.to(device)
 
-    # denorm = utils.Denormalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # denormalization for ori images
-
-    if opts.crop_val:
-        transform = T.Compose([
-                T.Resize(opts.crop_size),
-                T.CenterCrop(opts.crop_size),
-                T.ToTensor(),
-                T.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225]),
-            ])
-    else:
-        transform = T.Compose([
-                T.ToTensor(),
-                T.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225]),
-            ])
     if opts.save_val_results_to is not None:
         os.makedirs(opts.save_val_results_to, exist_ok=True)
         
@@ -123,37 +67,22 @@ def main():
             ext = os.path.basename(img_path).split('.')[-1]
             img_name = os.path.basename(img_path)[:-len(ext)-1]
             
-            pic = Image.open(img_path).convert('RGB')
-            pic = pic.resize((640, 480))
-            img = transform(pic).unsqueeze(0)
-            img = img.to(device)
+            image = Image.open(img_path).convert('RGB')
+            image = inf_utils.pre_process_image(image)
+            image_tensor = transform(image).unsqueeze(0)
             
-            pred = model(img).max(1)[1].cpu().numpy()[0]
+            pred = model(image_tensor).max(1)[1].cpu().numpy()[0]
             colorized_preds = decode_fn(pred).astype('uint8')
 
-            # Clean up B/W image using morphological operations
-            kernel = np.ones((15,15) , np.uint8) # kernel side determines resolution
-            colorized_preds = cv.morphologyEx(colorized_preds, cv.MORPH_OPEN, kernel)
-            colorized_preds = cv.morphologyEx(colorized_preds, cv.MORPH_CLOSE, kernel)
-
-            colorized_preds = Image.fromarray(colorized_preds)
-            
-            # Medium filter to smooth edges
-            colorized_preds = colorized_preds.filter(ImageFilter.ModeFilter(size=25))
+            colorized_preds = inf_utils.post_process_segmentation(colorized_preds)
 
             # Create instance of steering angle calculator
             lane_follower = st_util.HandCodedLaneFollower(img_name)
-
-            # Function that does a couple of things that could be removed.
-            # Most importantly returns array with boundary line overlay and calls another function that returns steering angle
             pred_with_angle = lane_follower.follow_lane(colorized_preds)
 
-            # Create the image
+            # Save image to file
             img_with_angle = Image.fromarray(pred_with_angle)
-
-            # Overlay segmentation with og image
-            final_img = Image.blend(img_with_angle, pic, 0.25)
-
+            final_img = Image.blend(img_with_angle, image, 0.25)
             if opts.save_val_results_to:
                 final_img.save(os.path.join(opts.save_val_results_to, img_name+'.png'))
 
